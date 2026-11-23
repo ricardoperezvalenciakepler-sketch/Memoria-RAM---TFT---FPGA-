@@ -1,0 +1,922 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+
+entity controlador_tft is
+    generic (
+        CLK_HZ    : positive := 50000000;
+        SPI_DIV   : positive := 4;
+        X_OFFSET  : natural := 0;
+        Y_OFFSET  : natural := 0
+    );
+    port (
+        CLK       : in  STD_LOGIC;
+        REFRESH   : in  STD_LOGIC;
+        ADDR_VIEW : in  STD_LOGIC_VECTOR(1 downto 0);
+        DATA_VIEW : in  STD_LOGIC_VECTOR(3 downto 0);
+
+        TFT_SCK   : out STD_LOGIC;
+        TFT_SDA   : out STD_LOGIC;
+        TFT_A0    : out STD_LOGIC;
+        TFT_RESET : out STD_LOGIC;
+        TFT_CS    : out STD_LOGIC
+    );
+end controlador_tft;
+
+architecture Behavioral of controlador_tft is
+
+    type state_type is (
+        RESET_LOW,
+        RESET_HIGH,
+        INIT_SEND,
+        INIT_WAIT,
+        RENDER_SETUP,
+        RENDER_SEND,
+        PIXEL_HIGH,
+        PIXEL_LOW,
+        IDLE
+    );
+
+    signal state : state_type := RESET_LOW;
+
+    signal tx_start : STD_LOGIC := '0';
+    signal tx_data  : STD_LOGIC_VECTOR(7 downto 0) := (others => '0');
+
+    signal tx_mosi : STD_LOGIC;
+    signal tx_sck  : STD_LOGIC;
+    signal tx_busy : STD_LOGIC;
+    signal tx_done : STD_LOGIC;
+
+    signal tx_dc    : STD_LOGIC := '0';
+    signal launched : STD_LOGIC := '0';
+
+    signal init_index   : integer range 0 to 53 := 0;
+    signal render_index : integer range 0 to 10 := 0;
+
+    signal delay_count : integer range 0 to 7500000 := 0;
+
+    signal x_count : integer range 0 to 127 := 0;
+    signal y_count : integer range 0 to 159 := 0;
+
+
+    -- TABLA DE INICIALIZACION ST7735
+    function init_byte(i : integer) return STD_LOGIC_VECTOR is
+    begin
+        case i is
+            when 0  => return x"01";
+            when 1  => return x"11";
+            when 2  => return x"B1";
+            when 3  => return x"01";
+            when 4  => return x"2C";
+            when 5  => return x"2D";
+            when 6  => return x"B2";
+            when 7  => return x"01";
+            when 8  => return x"2C";
+            when 9  => return x"2D";
+            when 10 => return x"B3";
+            when 11 => return x"01";
+            when 12 => return x"2C";
+            when 13 => return x"2D";
+            when 14 => return x"01";
+            when 15 => return x"2C";
+            when 16 => return x"2D";
+            when 17 => return x"B4";
+            when 18 => return x"07";
+            when 19 => return x"C0";
+            when 20 => return x"A2";
+            when 21 => return x"02";
+            when 22 => return x"84";
+            when 23 => return x"C1";
+            when 24 => return x"C5";
+            when 25 => return x"C2";
+            when 26 => return x"0A";
+            when 27 => return x"00";
+            when 28 => return x"C3";
+            when 29 => return x"8A";
+            when 30 => return x"2A";
+            when 31 => return x"C4";
+            when 32 => return x"8A";
+            when 33 => return x"EE";
+            when 34 => return x"C5";
+            when 35 => return x"0E";
+            when 36 => return x"20";
+            when 37 => return x"36";
+            when 38 => return x"C8";
+            when 39 => return x"3A";
+            when 40 => return x"05";
+            when 41 => return x"13";
+            when 42 => return x"29";
+            when 43 => return x"2A";
+            when 44 => return x"00";
+            when 45 => return x"00";
+            when 46 => return x"00";
+            when 47 => return x"7F";
+            when 48 => return x"2B";
+            when 49 => return x"00";
+            when 50 => return x"00";
+            when 51 => return x"00";
+            when 52 => return x"9F";
+            when others => return x"2C";
+        end case;
+    end function;
+
+
+    -- SELECCION COMANDO / DATO
+    function init_dc(i : integer) return STD_LOGIC is
+    begin
+        if i = 0 or i = 1 or i = 2 or i = 6 or i = 10 or
+           i = 17 or i = 19 or i = 23 or i = 25 or i = 28 or
+           i = 31 or i = 34 or i = 36 or i = 37 or i = 39 or
+           i = 41 or i = 42 or i = 43 or i = 48 or i = 53 then
+            return '0';
+        else
+            return '1';
+        end if;
+    end function;
+
+
+    -- DIRECCION DE PANTALLA
+    function render_byte(i : integer) return STD_LOGIC_VECTOR is
+    begin
+        case i is
+            when 0 => return x"2A";
+            when 1 =>
+                return std_logic_vector(to_unsigned((X_OFFSET / 256) mod 256, 8));
+            when 2 =>
+                return std_logic_vector(to_unsigned(X_OFFSET mod 256, 8));
+            when 3 =>
+                return std_logic_vector(to_unsigned(((127 + X_OFFSET) / 256) mod 256, 8));
+            when 4 =>
+                return std_logic_vector(to_unsigned((127 + X_OFFSET) mod 256, 8));
+            when 5 => return x"2B";
+            when 6 =>
+                return std_logic_vector(to_unsigned((Y_OFFSET / 256) mod 256, 8));
+            when 7 =>
+                return std_logic_vector(to_unsigned(Y_OFFSET mod 256, 8));
+            when 8 =>
+                return std_logic_vector(to_unsigned(((159 + Y_OFFSET) / 256) mod 256, 8));
+            when 9 =>
+                return std_logic_vector(to_unsigned((159 + Y_OFFSET) mod 256, 8));
+            when others => return x"2C";
+        end case;
+    end function;
+
+
+    function render_dc(i : integer) return STD_LOGIC is
+    begin
+        if i = 0 or i = 5 or i = 10 then
+            return '0';
+        else
+            return '1';
+        end if;
+    end function;
+
+
+    function bit_char(b : STD_LOGIC) return character is
+    begin
+        if b = '1' then
+            return '1';
+        else
+            return '0';
+        end if;
+    end function;
+
+
+    function line_length(line_no : integer) return integer is
+    begin
+        case line_no is
+            when 0 => return 11;
+            when 1 => return 9;
+            when 2 => return 10;
+            when others => return 0;
+        end case;
+    end function;
+
+
+    function line_char(
+        line_no : integer;
+        pos     : integer;
+        addr    : STD_LOGIC_VECTOR(1 downto 0);
+        data    : STD_LOGIC_VECTOR(3 downto 0)
+    ) return character is
+    begin
+        case line_no is
+            when 0 =>
+                case pos is
+                    when 0 => return 'M';
+                    when 1 => return 'E';
+                    when 2 => return 'M';
+                    when 3 => return 'O';
+                    when 4 => return 'R';
+                    when 5 => return 'I';
+                    when 6 => return 'A';
+                    when 7 => return ' ';
+                    when 8 => return 'R';
+                    when 9 => return 'A';
+                    when others => return 'M';
+                end case;
+
+            when 1 =>
+                case pos is
+                    when 0 => return 'D';
+                    when 1 => return 'I';
+                    when 2 => return 'R';
+                    when 3 => return 'E';
+                    when 4 => return 'C';
+                    when 5 => return 'C';
+                    when 6 => return 'I';
+                    when 7 => return 'O';
+                    when others => return 'N';
+                end case;
+
+            when 2 =>
+                case pos is
+                    when 0 => return 'D';
+                    when 1 => return 'A';
+                    when 2 => return 'T';
+                    when 3 => return 'O';
+                    when 4 => return ':';
+                    when 5 => return ' ';
+                    when 6 => return bit_char(not data(3));
+                    when 7 => return bit_char(not data(2));
+                    when 8 => return bit_char(not data(1));
+                    when others => return bit_char(not data(0));
+                end case;
+
+            when others => return ' ';
+        end case;
+    end function;
+
+
+    -- FUENTE DE LETRAS 5x7
+    function glyph_row(
+        c : character;
+        r : integer
+    ) return STD_LOGIC_VECTOR is
+
+        variable g : STD_LOGIC_VECTOR(4 downto 0) := "00000";
+
+    begin
+
+        if r < 0 or r > 6 then
+            return g;
+        end if;
+
+        case c is
+
+            when 'A' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "11111";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "10001";
+                end case;
+
+            when 'D' =>
+                case r is
+                    when 0 => g := "11110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "10001";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "11110";
+                end case;
+
+            when 'F' =>
+                case r is
+                    when 0 => g := "11111";
+                    when 1 => g := "10000";
+                    when 2 => g := "10000";
+                    when 3 => g := "11110";
+                    when 4 => g := "10000";
+                    when 5 => g := "10000";
+                    when others => g := "10000";
+                end case;
+
+            when 'G' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10000";
+                    when 3 => g := "10111";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "01110";
+                end case;
+
+            when 'I' =>
+                case r is
+                    when 0 => g := "11111";
+                    when 1 => g := "00100";
+                    when 2 => g := "00100";
+                    when 3 => g := "00100";
+                    when 4 => g := "00100";
+                    when 5 => g := "00100";
+                    when others => g := "11111";
+                end case;
+
+            when 'M' =>
+                case r is
+                    when 0 => g := "10001";
+                    when 1 => g := "11011";
+                    when 2 => g := "10101";
+                    when 3 => g := "10101";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "10001";
+                end case;
+
+            when 'P' =>
+                case r is
+                    when 0 => g := "11110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "11110";
+                    when 4 => g := "10000";
+                    when 5 => g := "10000";
+                    when others => g := "10000";
+                end case;
+
+            when 'R' =>
+                case r is
+                    when 0 => g := "11110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "11110";
+                    when 4 => g := "10100";
+                    when 5 => g := "10010";
+                    when others => g := "10001";
+                end case;
+
+            when 'T' =>
+                case r is
+                    when 0 => g := "11111";
+                    when 1 => g := "00100";
+                    when 2 => g := "00100";
+                    when 3 => g := "00100";
+                    when 4 => g := "00100";
+                    when 5 => g := "00100";
+                    when others => g := "00100";
+                end case;
+
+            when '0' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10011";
+                    when 3 => g := "10101";
+                    when 4 => g := "11001";
+                    when 5 => g := "10001";
+                    when others => g := "01110";
+                end case;
+
+            when '1' =>
+                case r is
+                    when 0 => g := "00100";
+                    when 1 => g := "01100";
+                    when 2 => g := "00100";
+                    when 3 => g := "00100";
+                    when 4 => g := "00100";
+                    when 5 => g := "00100";
+                    when others => g := "01110";
+                end case;
+
+            when 'E' =>
+                case r is
+                    when 0 => g := "11111";
+                    when 1 => g := "10000";
+                    when 2 => g := "10000";
+                    when 3 => g := "11110";
+                    when 4 => g := "10000";
+                    when 5 => g := "10000";
+                    when others => g := "11111";
+                end case;
+
+            when 'O' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "10001";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "01110";
+                end case;
+
+            when '2' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "00001";
+                    when 3 => g := "00010";
+                    when 4 => g := "00100";
+                    when 5 => g := "01000";
+                    when others => g := "11111";
+                end case;
+
+            when '3' =>
+                case r is
+                    when 0 => g := "11110";
+                    when 1 => g := "00001";
+                    when 2 => g := "00001";
+                    when 3 => g := "01110";
+                    when 4 => g := "00001";
+                    when 5 => g := "00001";
+                    when others => g := "11110";
+                end case;
+
+            when ':' =>
+                case r is
+                    when 2 => g := "00100";
+                    when 5 => g := "00100";
+                    when others => g := "00000";
+                end case;
+
+            when 'C' =>
+                case r is
+                    when 0 => g := "01110";
+                    when 1 => g := "10001";
+                    when 2 => g := "10000";
+                    when 3 => g := "10000";
+                    when 4 => g := "10000";
+                    when 5 => g := "10001";
+                    when others => g := "01110";
+                end case;
+
+            when 'N' =>
+                case r is
+                    when 0 => g := "10001";
+                    when 1 => g := "11001";
+                    when 2 => g := "11001";
+                    when 3 => g := "10101";
+                    when 4 => g := "10011";
+                    when 5 => g := "10011";
+                    when others => g := "10001";
+                end case;
+
+            when 'U' =>
+                case r is
+                    when 0 => g := "10001";
+                    when 1 => g := "10001";
+                    when 2 => g := "10001";
+                    when 3 => g := "10001";
+                    when 4 => g := "10001";
+                    when 5 => g := "10001";
+                    when others => g := "01110";
+                end case;
+
+            when others =>
+                g := "00000";
+
+        end case;
+
+        return g;
+
+    end function;
+	     -- DETECCION DE PIXEL DE TEXTO
+    function text_hit(
+        line_no : integer;
+        x       : integer;
+        y       : integer;
+        x0      : integer;
+        y0      : integer;
+        addr    : STD_LOGIC_VECTOR(1 downto 0);
+        data    : STD_LOGIC_VECTOR(3 downto 0)
+    ) return boolean is
+
+        variable px : integer;
+        variable py : integer;
+        variable pos : integer;
+        variable col : integer;
+        variable ch : character;
+        variable row_bits : STD_LOGIC_VECTOR(4 downto 0);
+
+    begin
+
+        px := x - x0;
+        py := y - y0;
+
+        if px < 0 or py < 0 or py > 6 then
+            return false;
+        end if;
+
+        pos := px / 6;
+        col := px mod 6;
+
+        if pos >= line_length(line_no) or col > 4 then
+            return false;
+        end if;
+
+        ch := line_char(line_no, pos, addr, data);
+        row_bits := glyph_row(ch, py);
+
+        if row_bits(4-col) = '1' then
+            return true;
+        else
+            return false;
+        end if;
+
+    end function;
+
+
+    function glyph_hit(
+        c : character;
+        x : integer;
+        y : integer;
+        x0 : integer;
+        y0 : integer
+    ) return boolean is
+
+        variable px : integer;
+        variable py : integer;
+        variable row_bits : STD_LOGIC_VECTOR(4 downto 0);
+
+    begin
+
+        px := x - x0;
+        py := y - y0;
+
+        if px < 0 or px > 4 or py < 0 or py > 6 then
+            return false;
+        end if;
+
+        row_bits := glyph_row(c, py);
+
+        return row_bits(4-px) = '1';
+
+    end function;
+
+
+    -- LOGOTIPO UPN EN BITMAP MONOCROMATICO 42 x 26
+    function logo_row(y : integer) return STD_LOGIC_VECTOR is
+    begin
+        case y is
+            when 0 => return "000000111011100000000011011101111100110011";
+            when 1 => return "000001111011110000000011011101111100110011";
+            when 2 => return "000011111011111000000011011101101110111011";
+            when 3 => return "000011111011111000000011011101101110111011";
+            when 4 => return "000111111011111100000011011101101110111111";
+            when 5 => return "001111111011111110000011011101111110111111";
+            when 6 => return "111111111011111111100011011101111100111111";
+            when 7 => return "111111111011111111100011011101111000110111";
+            when 8 => return "111101111011110111100011011101100000110111";
+            when 9 => return "111001111011110001100011111001100000110111";
+            when 10 => return "100001111011110000100011111001100000110011";
+            when 11 => return "000001111011110000000000000000000000000000";
+            when 12 => return "000001111011110000000000000000000000000000";
+            when 13 => return "000001111011110000000000000000000000000000";
+            when 14 => return "000001111011110000000011101101011111101010";
+            when 15 => return "000001111011110000000011110111011101111110";
+            when 16 => return "000001111011110000000011111011111111111110";
+            when 17 => return "000001111011110000000000000000000000000000";
+            when 18 => return "000001111011110000000000000000000000000000";
+            when 19 => return "000001111011110000000011111111111100000000";
+            when 20 => return "000001111011110000000010110111111100000000";
+            when 21 => return "000001111011110000000000000000000000000000";
+            when 22 => return "000001111011110000000000000000000000000000";
+            when 23 => return "000001111011110000000011110011111111000000";
+            when 24 => return "000001111011110000000011110011111101000000";
+            when 25 => return "000001111011110000000011111011111101000000";
+            when others => return (others => '0');
+        end case;
+    end function;
+
+
+    -- GENERACION DE COLOR RGB565
+    function pixel_color(
+        x : integer;
+        y : integer;
+        addr : STD_LOGIC_VECTOR(1 downto 0);
+        data : STD_LOGIC_VECTOR(3 downto 0)
+    ) return STD_LOGIC_VECTOR is
+
+        variable result_color : STD_LOGIC_VECTOR(15 downto 0);
+        variable box_x        : integer;
+        variable label_x      : integer;
+        variable bit_index    : integer;
+        variable logo_bits    : STD_LOGIC_VECTOR(41 downto 0);
+        variable digit_char   : character;
+
+    begin
+
+        -- FONDO ROSADO CLARO
+        result_color := x"F79E";
+
+        ------------------------------------------------
+        -- LOGO UPN: ESQUINA SUPERIOR DERECHA
+        ------------------------------------------------
+        if x >= 82 and x < 100 and y >= 5 and y < 31 then
+            logo_bits := logo_row(y - 5);
+            if logo_bits(41 - (x - 82)) = '1' then
+                result_color := x"0000";
+            end if;
+        end if;
+
+        -- TEXTO UPN EN NEGRO, IGUAL QUE EL SIMBOLO
+        if glyph_hit('U', x, y, 103, 14) or
+           glyph_hit('P', x, y, 109, 14) or
+           glyph_hit('N', x, y, 115, 14) then
+            result_color := x"0000";
+        end if;
+
+        ------------------------------------------------
+        -- TITULO, DIRECCION Y DATO
+        ------------------------------------------------
+        if text_hit(0, x, y, 31, 37, addr, data) then
+            result_color := x"000F";
+        elsif text_hit(1, x, y, 4, 58, addr, data) then
+            result_color := x"000F";
+        elsif text_hit(2, x, y, 29, 75, addr, data) then
+            result_color := x"000F";
+        end if;
+
+        ------------------------------------------------
+        -- INDICADORES DE DIRECCION
+        ------------------------------------------------
+        for i in 0 to 1 loop
+            box_x := 76 + (i * 14);
+
+            if x >= box_x and x < box_x + 9 and
+               y >= 56 and y < 66 then
+
+                if x = box_x or x = box_x + 8 or
+                   y = 56 or y = 65 then
+                    result_color := x"000F";
+                elsif addr(1-i) = '1' then
+                    result_color := x"001F";
+                else
+                    result_color := x"0000";
+                end if;
+            end if;
+        end loop;
+
+        ------------------------------------------------
+        -- ETIQUETAS D3, D2, D1, D0
+        ------------------------------------------------
+        for i in 0 to 3 loop
+            label_x := 8 + (i * 30);
+
+            case i is
+                when 0 => digit_char := '3';
+                when 1 => digit_char := '2';
+                when 2 => digit_char := '1';
+                when others => digit_char := '0';
+            end case;
+
+            if glyph_hit('D', x, y, label_x, 101) or
+               glyph_hit(digit_char, x, y, label_x + 6, 101) then
+                result_color := x"000F";
+            end if;
+        end loop;
+
+        ------------------------------------------------
+        -- CUADRITOS DE LOS CUATRO BITS
+        ------------------------------------------------
+        for i in 0 to 3 loop
+            box_x := 8 + (i * 30);
+            bit_index := 3 - i;
+
+            if x >= box_x and x < box_x + 14 and
+               y >= 123 and y < 137 then
+
+                if x = box_x or x = box_x + 13 or
+                   y = 123 or y = 136 then
+                    result_color := x"000F";
+
+                -- SWITCH EN 0: CUADRITO AZUL
+                elsif data(bit_index) = '0' then
+                    result_color := x"001F";
+
+                -- SWITCH EN 1: CUADRITO NEGRO
+                else
+                    result_color := x"0000";
+                end if;
+            end if;
+        end loop;
+
+        return result_color;
+
+    end function;
+
+begin
+
+    -- MODULO SPI
+    U_SPI: entity work.spi_master
+        generic map (
+            DIVIDER => SPI_DIV
+        )
+        port map (
+            CLK     => CLK,
+            RESET_N => '1',
+            START   => tx_start,
+            DATA_IN => tx_data,
+            MOSI    => tx_mosi,
+            SCK     => tx_sck,
+            BUSY    => tx_busy,
+            DONE    => tx_done
+        );
+
+    TFT_SCK <= tx_sck;
+    TFT_SDA <= tx_mosi;
+    TFT_A0  <= tx_dc;
+
+    TFT_CS <= '0';
+
+
+    -- MAQUINA DE ESTADOS TFT
+    process(CLK)
+
+        variable pix : STD_LOGIC_VECTOR(15 downto 0);
+
+    begin
+
+        if rising_edge(CLK) then
+
+            tx_start <= '0';
+
+            case state is
+
+                -- RESET DE PANTALLA
+                when RESET_LOW =>
+
+                    TFT_RESET <= '0';
+
+                    if delay_count >= (CLK_HZ / 100) then
+                        delay_count <= 0;
+                        TFT_RESET <= '1';
+                        state <= RESET_HIGH;
+                    else
+                        delay_count <= delay_count + 1;
+                    end if;
+
+
+                when RESET_HIGH =>
+
+                    TFT_RESET <= '1';
+
+                    if delay_count >= (CLK_HZ / 100) then
+                        delay_count <= 0;
+                        init_index <= 0;
+                        launched <= '0';
+                        state <= INIT_SEND;
+                    else
+                        delay_count <= delay_count + 1;
+                    end if;
+
+
+                -- ENVIO DE COMANDOS DE INICIALIZACION
+                when INIT_SEND =>
+
+                    if launched = '0' then
+                        tx_data <= init_byte(init_index);
+                        tx_dc <= init_dc(init_index);
+                        tx_start <= '1';
+                        launched <= '1';
+
+                    elsif tx_done = '1' then
+
+                        launched <= '0';
+
+                        if init_index = 0 then
+                            delay_count <= 7500000;
+                            state <= INIT_WAIT;
+
+                        elsif init_index = 1 then
+                            delay_count <= 6000000;
+                            state <= INIT_WAIT;
+
+                        elsif init_index = 53 then
+                            state <= RENDER_SETUP;
+
+                        else
+                            init_index <= init_index + 1;
+                        end if;
+                    end if;
+
+
+                -- ESPERAS DE INICIALIZACION
+                when INIT_WAIT =>
+
+                    if delay_count = 0 then
+                        init_index <= init_index + 1;
+                        state <= INIT_SEND;
+                    else
+                        delay_count <= delay_count - 1;
+                    end if;
+
+
+                -- PREPARACION DE DIBUJO
+                when RENDER_SETUP =>
+
+                    render_index <= 0;
+                    launched <= '0';
+                    state <= RENDER_SEND;
+
+
+                -- CONFIGURACION DE AREA DE PANTALLA
+                when RENDER_SEND =>
+
+                    if launched = '0' then
+                        tx_data <= render_byte(render_index);
+                        tx_dc <= render_dc(render_index);
+                        tx_start <= '1';
+                        launched <= '1';
+
+                    elsif tx_done = '1' then
+
+                        launched <= '0';
+
+                        if render_index = 10 then
+                            x_count <= 0;
+                            y_count <= 0;
+                            state <= PIXEL_HIGH;
+                        else
+                            render_index <= render_index + 1;
+                        end if;
+                    end if;
+
+
+                -- ENVIO DEL BYTE ALTO DEL PIXEL
+                when PIXEL_HIGH =>
+
+                    if launched = '0' then
+
+                        pix := pixel_color(
+                            x_count,
+                            y_count,
+                            ADDR_VIEW,
+                            DATA_VIEW
+                        );
+
+                        tx_data <= pix(15 downto 8);
+                        tx_dc <= '1';
+                        tx_start <= '1';
+                        launched <= '1';
+
+                    elsif tx_done = '1' then
+                        launched <= '0';
+                        state <= PIXEL_LOW;
+                    end if;
+
+
+                -- ENVIO DEL BYTE BAJO DEL PIXEL
+                when PIXEL_LOW =>
+
+                    if launched = '0' then
+
+                        pix := pixel_color(
+                            x_count,
+                            y_count,
+                            ADDR_VIEW,
+                            DATA_VIEW
+                        );
+
+                        tx_data <= pix(7 downto 0);
+                        tx_dc <= '1';
+                        tx_start <= '1';
+                        launched <= '1';
+
+                    elsif tx_done = '1' then
+
+                        launched <= '0';
+
+                        if x_count = 127 and y_count = 159 then
+                            state <= IDLE;
+                        else
+
+                            if x_count = 127 then
+                                x_count <= 0;
+                                y_count <= y_count + 1;
+                            else
+                                x_count <= x_count + 1;
+                            end if;
+
+                            state <= PIXEL_HIGH;
+                        end if;
+                    end if;
+
+
+                -- ESPERA HASTA BTN_MOSTRAR
+                when IDLE =>
+
+                    TFT_RESET <= '1';
+
+                    if REFRESH = '1' then
+                        state <= RENDER_SETUP;
+                    end if;
+
+
+                when others =>
+                    state <= RESET_LOW;
+
+            end case;
+
+        end if;
+
+    end process;
+
+end Behavioral;
