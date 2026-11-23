@@ -1,0 +1,54 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+entity control_visualizacion is
+    port (
+        CLK       : in  STD_LOGIC;
+
+        HABILITAR : in  STD_LOGIC;
+
+        ADDR_IN   : in  STD_LOGIC_VECTOR(1 downto 0);
+        DATA_RAM  : in  STD_LOGIC_VECTOR(3 downto 0);
+
+        ADDR_VIEW : out STD_LOGIC_VECTOR(1 downto 0);
+        DATA_VIEW : out STD_LOGIC_VECTOR(3 downto 0);
+
+        REFRESH   : out STD_LOGIC
+    );
+end control_visualizacion;
+
+architecture Behavioral of control_visualizacion is
+
+    signal addr_reg : STD_LOGIC_VECTOR(1 downto 0) := "00";
+    signal data_reg : STD_LOGIC_VECTOR(3 downto 0) := "0000";
+
+    signal refresh_reg : STD_LOGIC := '0';
+
+begin
+
+    process(CLK)
+    begin
+
+        if rising_edge(CLK) then
+
+            refresh_reg <= '0';
+
+            if HABILITAR = '1' then
+
+                addr_reg <= ADDR_IN;
+                data_reg <= DATA_RAM;
+
+                refresh_reg <= '1';
+
+            end if;
+
+        end if;
+
+    end process;
+
+    ADDR_VIEW <= addr_reg;
+    DATA_VIEW <= data_reg;
+
+    REFRESH <= refresh_reg;
+
+end Behavioral;
