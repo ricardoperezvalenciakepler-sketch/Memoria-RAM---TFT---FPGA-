@@ -1,0 +1,134 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+entity top_ram is
+    port (
+
+        -- RELOJ DE LA FPGA
+        CLK : in STD_LOGIC;
+
+        -- DIP SWITCH DE DATOS
+        D3 : in STD_LOGIC;
+        D2 : in STD_LOGIC;
+        D1 : in STD_LOGIC;
+        D0 : in STD_LOGIC;
+
+        -- DIP SWITCH DE DIRECCION
+        S1 : in STD_LOGIC;
+        S0 : in STD_LOGIC;
+
+        -- PULSADORES ACTIVOS EN BAJO
+        BTN_CARGAR  : in STD_LOGIC;
+        BTN_MOSTRAR : in STD_LOGIC;
+
+        -- PANTALLA TFT ST7735
+        TFT_SCK   : out STD_LOGIC;
+        TFT_SDA   : out STD_LOGIC;
+        TFT_A0    : out STD_LOGIC;
+        TFT_RESET : out STD_LOGIC;
+        TFT_CS    : out STD_LOGIC
+
+    );
+end top_ram;
+
+
+architecture Structural of top_ram is
+
+    signal DATA_IN  : STD_LOGIC_VECTOR(3 downto 0);
+    signal DATA_RAM : STD_LOGIC_VECTOR(3 downto 0);
+
+    signal PULSE_CARGAR  : STD_LOGIC;
+    signal PULSE_MOSTRAR : STD_LOGIC;
+
+    signal ADDR_VIEW : STD_LOGIC_VECTOR(1 downto 0);
+    signal DATA_VIEW : STD_LOGIC_VECTOR(3 downto 0);
+
+    signal REFRESH_TFT : STD_LOGIC;
+
+begin
+
+    -- INVERSION DE LOS DIP SWITCHES DE DATOS
+    DATA_IN <= not (D3 & D2 & D1 & D0);
+
+
+    -- ANTIRREBOTE BOTON CARGAR
+    U1: entity work.antirrebote
+        generic map (
+            DEBOUNCE_CYCLES => 1000000
+        )
+        port map (
+            CLK       => CLK,
+            BTN_N     => BTN_CARGAR,
+            PULSE_OUT => PULSE_CARGAR
+        );
+
+
+    -- ANTIRREBOTE BOTON MOSTRAR
+    U2: entity work.antirrebote
+        generic map (
+            DEBOUNCE_CYCLES => 1000000
+        )
+        port map (
+            CLK       => CLK,
+            BTN_N     => BTN_MOSTRAR,
+            PULSE_OUT => PULSE_MOSTRAR
+        );
+
+
+    -- MEMORIA RAM
+    U3: entity work.memoria_ram
+        port map (
+            CLK      => CLK,
+
+            S1       => S1,
+            S0       => S0,
+
+            DATA_IN  => DATA_IN,
+
+            CARGAR   => PULSE_CARGAR,
+
+            DATA_OUT => DATA_RAM
+        );
+
+
+    -- CONTROL DE VISUALIZACION
+    U4: entity work.control_visualizacion
+        port map (
+            CLK       => CLK,
+
+            HABILITAR => PULSE_MOSTRAR,
+
+            ADDR_IN   => S1 & S0,
+            DATA_RAM  => DATA_RAM,
+
+            ADDR_VIEW => ADDR_VIEW,
+            DATA_VIEW => DATA_VIEW,
+
+            REFRESH   => REFRESH_TFT
+        );
+
+
+    -- CONTROLADOR TFT ST7735
+    U5: entity work.controlador_tft
+        generic map (
+            CLK_HZ   => 50000000,
+            SPI_DIV  => 4,
+            X_OFFSET => 0,
+            Y_OFFSET => 0
+        )
+        port map (
+            CLK       => CLK,
+
+            REFRESH   => REFRESH_TFT,
+
+            ADDR_VIEW => ADDR_VIEW,
+            DATA_VIEW => DATA_VIEW,
+
+            TFT_SCK   => TFT_SCK,
+            TFT_SDA   => TFT_SDA,
+            TFT_A0    => TFT_A0,
+            TFT_RESET => TFT_RESET,
+            TFT_CS    => TFT_CS
+        );
+
+end Structural;
