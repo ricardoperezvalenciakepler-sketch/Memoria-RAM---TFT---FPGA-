@@ -1,0 +1,58 @@
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+entity antirrebote is
+    generic (
+        DEBOUNCE_CYCLES : positive := 1000000
+    );
+    port (
+        CLK       : in  STD_LOGIC;
+        BTN_N     : in  STD_LOGIC;
+        PULSE_OUT : out STD_LOGIC
+    );
+end antirrebote;
+
+architecture Behavioral of antirrebote is
+
+    signal sync1          : STD_LOGIC := '1';
+    signal sync2          : STD_LOGIC := '1';
+    signal estado_estable : STD_LOGIC := '1';
+
+    signal contador : integer range 0 to DEBOUNCE_CYCLES-1 := 0;
+    signal pulso    : STD_LOGIC := '0';
+
+begin
+
+    process(CLK)
+    begin
+        if rising_edge(CLK) then
+
+            sync1 <= BTN_N;
+            sync2 <= sync1;
+            pulso <= '0';
+
+            if sync2 = estado_estable then
+                contador <= 0;
+
+            else
+                if contador = DEBOUNCE_CYCLES-1 then
+
+                    estado_estable <= sync2;
+                    contador <= 0;
+
+                    if estado_estable = '1' and sync2 = '0' then
+                        pulso <= '1';
+                    end if;
+
+                else
+                    contador <= contador + 1;
+                end if;
+            end if;
+
+        end if;
+    end process;
+
+    PULSE_OUT <= pulso;
+
+end Behavioral;
